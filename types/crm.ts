@@ -175,28 +175,8 @@ crm_status: GOOD_LEAD_FOLLOW_UP|DID_NOT_CONNECT|BAD_LEAD|SALE_DONE|"". data_sour
 /** @deprecated Use FALLBACK_BATCH_PROMPT */
 export const SYSTEM_PROMPT = FALLBACK_BATCH_PROMPT;
 
-export interface ImportJobResponse {
-  success: boolean;
-  jobId: string;
-  message?: string;
-  error?: string;
-}
-
-export interface ImportJobStatusResponse {
-  success: boolean;
-  jobId: string;
-  status: 'pending' | 'processing' | 'completed' | 'failed';
-  progress: {
-    stage: string;
-    message: string;
-    currentBatch: number;
-    totalBatches: number;
-    processedRows: number;
-    totalRows: number;
-    percent: number;
-    elapsedMs: number;
-    estimatedRemainingMs?: number;
-  };
-  result?: ImportResponse;
-  error?: string;
+export interface ImportRequest {
+  columns: string[];
+  rows: Record<string, string>[];
+  batchSize?: number;
 }

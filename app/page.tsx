@@ -24,29 +24,19 @@ import { Button } from '@/components/ui/button';
 import { Card, CardContent } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { parseCSV } from '@/lib/csv-utils';
-import type { ParsedCSV, ImportResponse, CRMRecord, ImportJobResponse, ImportJobStatusResponse } from '@/types/crm';
+import type { ParsedCSV, ImportResponse, CRMRecord } from '@/types/crm';
 
 type AppState = 'idle' | 'preview' | 'processing' | 'results' | 'error';
 
 const DEFAULT_BATCH_SIZE = 100;
-const POLL_INTERVAL_MS = 1000;
 
-function mapJobStageToUiStage(stage: string): ProcessingStage {
-  switch (stage) {
-    case 'parsing':
-      return 'parsing';
-    case 'mapping':
-      return 'mapping';
-    case 'transforming':
-      return 'transforming';
-    case 'ai_inference':
-      return 'processing';
-    case 'completed':
-      return 'done';
-    default:
-      return 'processing';
-  }
-}
+const PROCESSING_STAGES: { stage: ProcessingStage; progress: number; message: string }[] = [
+  { stage: 'mapping', progress: 15, message: 'Detecting column mapping...' },
+  { stage: 'transforming', progress: 35, message: 'Extracting fields locally...' },
+  { stage: 'processing', progress: 55, message: 'Processing with AI...' },
+  { stage: 'processing', progress: 75, message: 'Inferring semantic values...' },
+  { stage: 'finalizing', progress: 90, message: 'Finalizing results...' },
+];
 
 export default function Home() {
   const [appState, setAppState] = useState<AppState>('idle');
@@ -89,88 +79,73 @@ export default function Home() {
   }, []);
 
   const handleConfirmImport = useCallback(async () => {
-    if (!selectedFile || isImporting) return;
+    if (!parsedData || isImporting) return;
 
     setIsImporting(true);
     setAppState('processing');
-    setProcessingStage('uploading');
-    setProcessingProgress(5);
-    setProcessingMessage('Uploading file...');
+    setProcessingStage('mapping');
+    setProcessingProgress(10);
+    setProcessingMessage('Starting import...');
     setElapsedMs(0);
     setEstimatedRemainingMs(undefined);
     setError(null);
 
+    const importStartTime = Date.now();
+    const totalBatches = Math.ceil(parsedData.totalRows / DEFAULT_BATCH_SIZE);
+    setBatchInfo({ current: 1, total: totalBatches });
+
+    const elapsedTimer = window.setInterval(() => {
+      setElapsedMs(Date.now() - importStartTime);
+    }, 500);
+
+    let stageIndex = 0;
+    const progressTimer = window.setInterval(() => {
+      if (stageIndex < PROCESSING_STAGES.length) {
+        const { stage, progress, message } = PROCESSING_STAGES[stageIndex];
+        setProcessingStage(stage);
+        setProcessingProgress(progress);
+        setProcessingMessage(message);
+        setBatchInfo({ current: Math.min(stageIndex + 1, totalBatches), total: totalBatches });
+        const elapsed = Date.now() - importStartTime;
+        if (progress > 0 && progress < 100) {
+          setEstimatedRemainingMs(Math.round((elapsed / progress) * (100 - progress)));
+        }
+        stageIndex++;
+      }
+    }, 2000);
+
     try {
-      const batchSize = DEFAULT_BATCH_SIZE;
-      const totalBatches = parsedData
-        ? Math.ceil(parsedData.totalRows / batchSize)
-        : 1;
-      setBatchInfo({ current: 0, total: totalBatches });
-
-      const formData = new FormData();
-      formData.append('file', selectedFile);
-      formData.append('batchSize', String(batchSize));
-
-      const uploadResponse = await fetch('/api/upload', {
+      const importResponse = await fetch('/api/import', {
         method: 'POST',
-        body: formData,
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          columns: parsedData.columns,
+          rows: parsedData.rows,
+          batchSize: DEFAULT_BATCH_SIZE,
+        }),
       });
 
-      const uploadData: ImportJobResponse = await uploadResponse.json();
+      const result: ImportResponse = await importResponse.json();
 
-      if (!uploadResponse.ok || !uploadData.success || !uploadData.jobId) {
-        throw new Error(uploadData.error || 'Failed to start import job.');
+      if (!importResponse.ok || !result.success) {
+        throw new Error(result.error || 'Import failed.');
       }
 
-      setProcessingStage('parsing');
-      setProcessingMessage(uploadData.message || 'Parsing CSV...');
-
-      const jobId = uploadData.jobId;
-      let completed = false;
-
-      while (!completed) {
-        await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));
-
-        const statusResponse = await fetch(`/api/import/${jobId}`);
-        const statusData: ImportJobStatusResponse = await statusResponse.json();
-
-        if (!statusResponse.ok) {
-          throw new Error(statusData.error || 'Failed to fetch import status.');
-        }
-
-        const { progress } = statusData;
-        setProcessingProgress(progress.percent);
-        setProcessingMessage(progress.message);
-        setElapsedMs(progress.elapsedMs);
-        setEstimatedRemainingMs(progress.estimatedRemainingMs);
-        setProcessingStage(mapJobStageToUiStage(progress.stage));
-
-        if (progress.totalBatches > 0) {
-          setBatchInfo({
-            current: progress.currentBatch,
-            total: progress.totalBatches,
-          });
-        }
-
-        if (statusData.status === 'completed' && statusData.result) {
-          setProcessingProgress(100);
-          setProcessingStage('done');
-          setProcessingMessage('Import completed');
-          setImportResult(statusData.result);
-          setAppState('results');
-          completed = true;
-        } else if (statusData.status === 'failed') {
-          throw new Error(statusData.error || 'Import failed.');
-        }
-      }
+      setProcessingProgress(100);
+      setProcessingStage('done');
+      setProcessingMessage('Import completed');
+      setImportResult(result);
+      setAppState('results');
     } catch (err) {
       setError(err instanceof Error ? err.message : 'An unexpected error occurred.');
       setAppState('error');
     } finally {
+      window.clearInterval(elapsedTimer);
+      window.clearInterval(progressTimer);
       setIsImporting(false);
       setBatchInfo(undefined);
     }
-  }, [selectedFile, parsedData, isImporting]);
+  }, [parsedData, isImporting]);
 
   const handleReset = useCallback(() => {
     setSelectedFile(null);

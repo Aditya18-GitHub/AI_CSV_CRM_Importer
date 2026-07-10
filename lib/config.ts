@@ -29,6 +29,5 @@ export const config = {
   groqModel: process.env.GROQ_MODEL || 'llama3-70b-8192',
   cerebrasModel: process.env.CEREBRAS_MODEL || 'llama3.1-70b',
   openrouterModel: process.env.OPENROUTER_MODEL || 'meta-llama/llama-3.1-70b-instruct:free',
-  jobPollIntervalMs: parseIntEnv('JOB_POLL_INTERVAL_MS', 1000, 500, 5000),
   maxFileSizeBytes: parseIntEnv('MAX_FILE_SIZE_MB', 10, 1, 50) * 1024 * 1024,
 } as const;
