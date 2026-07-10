@@ -1,130 +1,125 @@
-import { GoogleGenerativeAI } from '@google/generative-ai';
-import { SYSTEM_PROMPT, type CRMRecord } from '@/types/crm';
+import pLimit from 'p-limit';
+import { config } from '@/lib/config';
+import { logger } from '@/lib/logger';
+import { trimRows } from '@/lib/record-utils';
+import type { CRMRecord } from '@/types/crm';
+import { updateJobProgress } from '@/lib/job-store';
+import { inferColumnMapping } from '@/lib/ai/SchemaInference';
+import { TransformationEngine } from '@/lib/ai/TransformationEngine';
+import { inferSemanticValues } from '@/lib/ai/SemanticInference';
 
-const API_KEY = process.env.GEMINI_API_KEY || process.env.OPENAI_API_KEY || '';
+export type ProgressCallback = (
+  stage: 'parsing' | 'mapping' | 'transform' | 'semantic_inference' | 'completed',
+  current: number,
+  total: number,
+  message?: string
+) => void;
 
-function getClient() {
-  if (!API_KEY) {
-    throw new Error('No AI API key configured. Set GEMINI_API_KEY in environment variables.');
-  }
-  return new GoogleGenerativeAI(API_KEY);
-}
 
-function extractJson(text: string): unknown {
-  let cleaned = text.trim();
-  cleaned = cleaned.replace(/^```json\s*/i, '').replace(/^```\s*/i, '').replace(/```\s*$/i, '');
-  const start = cleaned.indexOf('[');
-  const end = cleaned.lastIndexOf(']');
-  if (start !== -1 && end !== -1 && end > start) {
-    cleaned = cleaned.slice(start, end + 1);
-  }
-  return JSON.parse(cleaned);
-}
-
-function validateRecord(rec: unknown): rec is CRMRecord {
-  if (typeof rec !== 'object' || rec === null) return false;
-  const r = rec as Record<string, unknown>;
-  return (
-    typeof r.created_at === 'string' &&
-    typeof r.name === 'string' &&
-    typeof r.email === 'string' &&
-    typeof r.country_code === 'string' &&
-    typeof r.mobile_without_country_code === 'string' &&
-    typeof r.company === 'string' &&
-    typeof r.city === 'string' &&
-    typeof r.state === 'string' &&
-    typeof r.country === 'string' &&
-    typeof r.lead_owner === 'string' &&
-    typeof r.crm_status === 'string' &&
-    typeof r.crm_note === 'string' &&
-    typeof r.data_source === 'string' &&
-    typeof r.possession_time === 'string' &&
-    typeof r.description === 'string'
-  );
-}
-
-function shouldSkip(rec: CRMRecord): boolean {
-  const hasEmail = rec.email && rec.email.trim().length > 0;
-  const hasMobile = rec.mobile_without_country_code && rec.mobile_without_country_code.trim().length > 0;
-  return !hasEmail && !hasMobile;
-}
-
-export async function processBatch(
-  batch: Record<string, string>[],
-  batchIndex: number,
-  totalBatches: number
+export async function processCSVRows(
+  columns: string[],
+  rows: Record<string, string>[],
+  batchSize: number = config.maxBatchSize,
+  onProgress?: ProgressCallback
 ): Promise<CRMRecord[]> {
-  const client = getClient();
-  const model = client.getGenerativeModel({
-    model: 'gemini-1.5-flash',
-    systemInstruction: SYSTEM_PROMPT,
+  const totalStart = Date.now();
+  const trimmedRows = trimRows(rows);
+
+  logger.info('Starting CSV processing with new architecture', {
+    totalRows: trimmedRows.length,
+    totalColumns: columns.length,
   });
 
-  const userPrompt = `Map the following ${batch.length} CSV records into the CRM schema. Return ONLY a JSON array — no markdown, no explanation.
+  // Step 1: Schema Inference (1 AI call)
+  onProgress?.('mapping', 0, 1, 'Inferring column schema...');
+  const mappingStart = Date.now();
+  const mapping = await inferColumnMapping(columns, trimmedRows.slice(0, 10));
+  logger.info('Schema inference complete', { durationMs: Date.now() - mappingStart });
+  onProgress?.('mapping', 1, 1, 'Schema inferred');
 
-Batch ${batchIndex + 1} of ${totalBatches}.
+  // Step 2: JavaScript Transformation (deterministic, no AI)
+  onProgress?.('transform', 0, 1, 'Transforming rows with JavaScript...');
+  const transformStart = Date.now();
+  const transformResult = TransformationEngine.transformRows(trimmedRows, mapping);
+  let records = transformResult.records;
+  logger.info('JavaScript transformation complete', {
+    durationMs: Date.now() - transformStart,
+    extracted: records.length,
+    totalRows: trimmedRows.length,
+  });
+  onProgress?.('transform', 1, 1, `Transformed ${records.length} records`);
 
-CSV records (as JSON objects with original column names):
-${JSON.stringify(batch, null, 0)}`;
-
-  const maxRetries = 3;
-  let lastError: Error | null = null;
-
-  for (let attempt = 0; attempt < maxRetries; attempt++) {
-    try {
-      const result = await model.generateContent(userPrompt);
-      const text = result.response.text();
-      const parsed = extractJson(text);
-
-      if (!Array.isArray(parsed)) {
-        throw new Error('AI response is not a JSON array');
-      }
-
-      const valid: CRMRecord[] = [];
-      for (const rec of parsed) {
-        if (validateRecord(rec)) {
-          if (!shouldSkip(rec)) {
-            valid.push(rec);
-          }
-        }
-      }
-      return valid;
-    } catch (err) {
-      const raw = err instanceof Error ? err.message : String(err);
-      if (raw.includes('429') || raw.toLowerCase().includes('quota')) {
-        throw new Error(
-          'Gemini API quota exceeded. Please wait a moment and try again, or check your API plan at https://ai.google.dev/gemini-api/docs/rate-limits.'
-        );
-      }
-      lastError = err instanceof Error ? err : new Error(String(err));
-      if (attempt < maxRetries - 1) {
-        await new Promise((resolve) => setTimeout(resolve, 1000 * (attempt + 1)));
-      }
-    }
+  // Step 3: Semantic Inference (only if needed, unique values only)
+  if (config.inferAmbiguousFields && transformResult.ambiguousFields.size > 0) {
+    onProgress?.('semantic_inference', 0, 1, 'Inferring semantic values...');
+    const semanticStart = Date.now();
+    
+    const semanticMappings = await inferSemanticValues(
+      transformResult.ambiguousFields,
+      transformResult.uniqueValues
+    );
+    
+    records = TransformationEngine.applySemanticMappings(records, semanticMappings);
+    
+    logger.info('Semantic inference complete', {
+      durationMs: Date.now() - semanticStart,
+      fieldsProcessed: semanticMappings.size,
+    });
+    onProgress?.('semantic_inference', 1, 1, 'Semantic inference complete');
   }
 
-  throw lastError || new Error('AI processing failed');
+  logger.info('New architecture processing complete', {
+    totalDurationMs: Date.now() - totalStart,
+    imported: records.length,
+    skipped: trimmedRows.length - records.length,
+  });
+
+  onProgress?.('completed', 1, 1, 'Import completed');
+  return records;
 }
 
-export async function processAllBatches(
+
+export async function runImportJob(
+  jobId: string,
+  columns: string[],
   rows: Record<string, string>[],
-  batchSize: number,
-  onProgress?: (current: number, total: number) => void
+  batchSize: number
 ): Promise<CRMRecord[]> {
-  const batches: Record<string, string>[][] = [];
-  for (let i = 0; i < rows.length; i += batchSize) {
-    batches.push(rows.slice(i, i + batchSize));
-  }
+  const startTime = Date.now();
 
-  const totalBatches = batches.length;
-  const allRecords: CRMRecord[] = [];
+  const onProgress: ProgressCallback = (stage, current, total, message) => {
+    const stageMap: Record<string, Parameters<typeof updateJobProgress>[1]['stage']> = {
+      parsing: 'parsing',
+      mapping: 'mapping',
+      transform: 'transforming',
+      semantic_inference: 'ai_inference',
+      completed: 'completed',
+    };
 
-  for (let i = 0; i < batches.length; i++) {
-    onProgress?.(i, totalBatches);
-    const records = await processBatch(batches[i], i, totalBatches);
-    allRecords.push(...records);
-  }
+    let percent = 0;
+    if (stage === 'mapping') percent = 10 + (current / Math.max(total, 1)) * 15;
+    else if (stage === 'transform') percent = 25 + (current / Math.max(total, 1)) * 40;
+    else if (stage === 'semantic_inference') percent = 65 + (current / Math.max(total, 1)) * 30;
+    else if (stage === 'completed') percent = 100;
 
-  onProgress?.(totalBatches, totalBatches);
-  return allRecords;
+    const elapsedMs = Date.now() - startTime;
+    const estimatedRemainingMs =
+      percent > 0 && percent < 100
+        ? Math.round((elapsedMs / percent) * (100 - percent))
+        : 0;
+
+    updateJobProgress(jobId, {
+      stage: stageMap[stage] || 'ai_inference',
+      message: message || stage,
+      currentBatch: current,
+      totalBatches: total,
+      processedRows: Math.round((rows.length * percent) / 100),
+      totalRows: rows.length,
+      percent: Math.round(percent),
+      elapsedMs,
+      estimatedRemainingMs,
+    });
+  };
+
+  return processCSVRows(columns, rows, batchSize, onProgress);
 }

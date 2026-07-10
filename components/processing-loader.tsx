@@ -1,12 +1,15 @@
 'use client';
 
-import { Loader2, CheckCircle2, Sparkles } from 'lucide-react';
+import { motion } from 'framer-motion';
+import { Loader2, CheckCircle2, Sparkles, Clock } from 'lucide-react';
 import { Progress } from '@/components/ui/progress';
 import { cn } from '@/lib/utils';
 
 export type ProcessingStage =
   | 'uploading'
   | 'parsing'
+  | 'mapping'
+  | 'transforming'
   | 'processing'
   | 'finalizing'
   | 'done';
@@ -14,95 +17,164 @@ export type ProcessingStage =
 interface ProcessingLoaderProps {
   stage: ProcessingStage;
   progress: number;
+  message?: string;
   batchInfo?: { current: number; total: number };
+  elapsedMs?: number;
+  estimatedRemainingMs?: number;
 }
 
 const STAGE_LABELS: Record<ProcessingStage, string> = {
   uploading: 'Uploading file...',
   parsing: 'Parsing CSV...',
+  mapping: 'Detecting column mapping...',
+  transforming: 'Extracting fields locally...',
   processing: 'Processing with AI...',
   finalizing: 'Finalizing results...',
   done: 'Complete!',
 };
 
+function formatDuration(ms: number): string {
+  const seconds = Math.floor(ms / 1000);
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.floor(seconds / 60);
+  const remainingSeconds = seconds % 60;
+  return `${minutes}m ${remainingSeconds}s`;
+}
+
 export function ProcessingLoader({
   stage,
   progress,
+  message,
   batchInfo,
+  elapsedMs = 0,
+  estimatedRemainingMs,
 }: ProcessingLoaderProps) {
   const stages: ProcessingStage[] = [
     'uploading',
     'parsing',
+    'mapping',
+    'transforming',
     'processing',
     'finalizing',
   ];
   const currentStageIndex = stages.indexOf(stage);
+  const displayLabel = message || STAGE_LABELS[stage];
 
   return (
-    <div className="animate-scale-in flex flex-col items-center gap-8 py-12">
-      <div className="relative flex h-20 w-20 items-center justify-center">
-        <div className="absolute inset-0 rounded-full bg-primary/10 animate-ping" />
-        <div className="relative flex h-20 w-20 items-center justify-center rounded-full bg-gradient-to-br from-primary to-primary/70 shadow-xl shadow-primary/30">
+    <motion.div
+      initial={{ opacity: 0, scale: 0.95 }}
+      animate={{ opacity: 1, scale: 1 }}
+      transition={{ duration: 0.4 }}
+      className="flex flex-col items-center gap-10 py-16"
+    >
+      <motion.div
+        initial={{ scale: 0.8, opacity: 0 }}
+        animate={{ scale: 1, opacity: 1 }}
+        transition={{ duration: 0.5, delay: 0.1 }}
+        className="relative flex h-24 w-24 items-center justify-center"
+      >
+        <motion.div
+          animate={{
+            scale: stage === 'done' ? [1, 1.2, 1] : 1,
+            rotate: stage === 'processing' ? 360 : 0,
+          }}
+          transition={{
+            duration: stage === 'done' ? 0.6 : 2,
+            repeat: stage === 'processing' ? Infinity : 0,
+            ease: 'easeInOut',
+          }}
+          className="absolute inset-0 rounded-full bg-gradient-to-br from-primary/20 to-primary/5"
+        />
+        <div className="relative flex h-24 w-24 items-center justify-center rounded-full bg-gradient-to-br from-primary to-primary/70 shadow-2xl shadow-primary/40">
           {stage === 'done' ? (
-            <CheckCircle2 className="h-10 w-10 text-primary-foreground" />
+            <motion.div
+              initial={{ scale: 0 }}
+              animate={{ scale: 1 }}
+              transition={{ duration: 0.4, delay: 0.2, type: 'spring' }}
+            >
+              <CheckCircle2 className="h-12 w-12 text-white" />
+            </motion.div>
           ) : (
-            <Loader2 className="h-10 w-10 animate-spin text-primary-foreground" />
+            <Loader2 className="h-12 w-12 animate-spin text-white" />
           )}
         </div>
-      </div>
+      </motion.div>
 
-      <div className="w-full max-w-md space-y-3">
+      <motion.div
+        initial={{ opacity: 0, y: 20 }}
+        animate={{ opacity: 1, y: 0 }}
+        transition={{ duration: 0.5, delay: 0.2 }}
+        className="w-full max-w-lg space-y-4"
+      >
         <div className="flex items-center justify-between text-sm">
-          <span className="font-medium">{STAGE_LABELS[stage]}</span>
-          <span className="text-muted-foreground">{Math.round(progress)}%</span>
+          <span className="font-semibold text-lg">{displayLabel}</span>
+          <span className="text-muted-foreground font-medium">{Math.round(progress)}%</span>
         </div>
-        <Progress value={progress} className="h-2" />
-        {batchInfo && stage === 'processing' && (
-          <p className="text-center text-sm text-muted-foreground">
-            Processing AI Batch {batchInfo.current} of {batchInfo.total}
-          </p>
+        <Progress value={progress} className="h-3" />
+        {batchInfo && (stage === 'processing' || stage === 'transforming') && batchInfo.total > 0 && (
+          <motion.p
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            className="text-center text-sm text-muted-foreground"
+          >
+            Processing batch {batchInfo.current} of {batchInfo.total}
+          </motion.p>
         )}
-      </div>
+        <div className="flex items-center justify-center gap-6 text-sm text-muted-foreground">
+          <span className="flex items-center gap-2">
+            <Clock className="h-4 w-4" />
+            Elapsed: {formatDuration(elapsedMs)}
+          </span>
+          {estimatedRemainingMs !== undefined && estimatedRemainingMs > 0 && stage !== 'done' && (
+            <span>Est. remaining: ~{formatDuration(estimatedRemainingMs)}</span>
+          )}
+        </div>
+      </motion.div>
 
-      <div className="flex flex-wrap items-center justify-center gap-2">
+      <motion.div
+        initial={{ opacity: 0, y: 20 }}
+        animate={{ opacity: 1, y: 0 }}
+        transition={{ duration: 0.5, delay: 0.3 }}
+        className="flex flex-wrap items-center justify-center gap-3"
+      >
         {stages.map((s, i) => {
           const isComplete = i < currentStageIndex;
           const isCurrent = i === currentStageIndex;
           return (
-            <div
+            <motion.div
               key={s}
+              initial={{ opacity: 0, scale: 0.8 }}
+              animate={{ opacity: 1, scale: 1 }}
+              transition={{ duration: 0.3, delay: 0.4 + i * 0.05 }}
               className={cn(
-                'flex items-center gap-2 rounded-full px-3 py-1.5 text-xs font-medium transition-all',
-                isComplete && 'bg-success/10 text-success',
-                isCurrent && 'bg-primary/10 text-primary',
-                !isComplete && !isCurrent && 'bg-muted text-muted-foreground'
+                'flex items-center gap-2 rounded-full px-4 py-2 text-sm font-medium transition-all',
+                isComplete && 'bg-success/10 text-success border border-success/20',
+                isCurrent && 'bg-primary/10 text-primary border border-primary/20 shadow-lg shadow-primary/20',
+                !isComplete && !isCurrent && 'bg-muted/50 text-muted-foreground border border-border/50'
               )}
             >
               {isComplete ? (
-                <CheckCircle2 className="h-3.5 w-3.5" />
+                <CheckCircle2 className="h-4 w-4" />
               ) : isCurrent ? (
-                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                <Loader2 className="h-4 w-4 animate-spin" />
               ) : (
-                <div className="h-3.5 w-3.5 rounded-full border-2 border-current" />
+                <div className="h-4 w-4 rounded-full border-2 border-current" />
               )}
-              <span className="capitalize">{s}</span>
-              {i < stages.length - 1 && (
-                <div
-                  className={cn(
-                    'ml-1 h-px w-6',
-                    isComplete ? 'bg-success/30' : 'bg-muted-foreground/20'
-                  )}
-                />
-              )}
-            </div>
+              <span className="capitalize">{s.replace('_', ' ')}</span>
+            </motion.div>
           );
         })}
-      </div>
+      </motion.div>
 
-      <div className="flex items-center gap-2 text-sm text-muted-foreground">
-        <Sparkles className="h-4 w-4 text-primary" />
+      <motion.div
+        initial={{ opacity: 0, y: 20 }}
+        animate={{ opacity: 1, y: 0 }}
+        transition={{ duration: 0.5, delay: 0.5 }}
+        className="flex items-center gap-3 text-sm text-muted-foreground bg-gradient-to-r from-primary/5 to-primary/10 px-6 py-4 rounded-2xl border border-primary/20"
+      >
+        <Sparkles className="h-5 w-5 text-primary" />
         <span>AI is intelligently mapping your data to CRM schema...</span>
-      </div>
-    </div>
+      </motion.div>
+    </motion.div>
   );
 }

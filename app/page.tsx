@@ -1,6 +1,7 @@
 'use client';
 
 import { useCallback, useState } from 'react';
+import { motion } from 'framer-motion';
 import {
   Sparkles,
   FileSpreadsheet,
@@ -23,9 +24,29 @@ import { Button } from '@/components/ui/button';
 import { Card, CardContent } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { parseCSV } from '@/lib/csv-utils';
-import type { ParsedCSV, ImportResponse, CRMRecord } from '@/types/crm';
+import type { ParsedCSV, ImportResponse, CRMRecord, ImportJobResponse, ImportJobStatusResponse } from '@/types/crm';
 
 type AppState = 'idle' | 'preview' | 'processing' | 'results' | 'error';
+
+const DEFAULT_BATCH_SIZE = 100;
+const POLL_INTERVAL_MS = 1000;
+
+function mapJobStageToUiStage(stage: string): ProcessingStage {
+  switch (stage) {
+    case 'parsing':
+      return 'parsing';
+    case 'mapping':
+      return 'mapping';
+    case 'transforming':
+      return 'transforming';
+    case 'ai_inference':
+      return 'processing';
+    case 'completed':
+      return 'done';
+    default:
+      return 'processing';
+  }
+}
 
 export default function Home() {
   const [appState, setAppState] = useState<AppState>('idle');
@@ -35,7 +56,11 @@ export default function Home() {
   const [parsedData, setParsedData] = useState<ParsedCSV | null>(null);
   const [processingStage, setProcessingStage] = useState<ProcessingStage>('uploading');
   const [processingProgress, setProcessingProgress] = useState(0);
+  const [processingMessage, setProcessingMessage] = useState<string>();
+  const [elapsedMs, setElapsedMs] = useState(0);
+  const [estimatedRemainingMs, setEstimatedRemainingMs] = useState<number>();
   const [batchInfo, setBatchInfo] = useState<{ current: number; total: number } | undefined>();
+  const [isImporting, setIsImporting] = useState(false);
   const [importResult, setImportResult] = useState<ImportResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -64,65 +89,88 @@ export default function Home() {
   }, []);
 
   const handleConfirmImport = useCallback(async () => {
-    if (!selectedFile) return;
+    if (!selectedFile || isImporting) return;
 
+    setIsImporting(true);
     setAppState('processing');
     setProcessingStage('uploading');
     setProcessingProgress(5);
+    setProcessingMessage('Uploading file...');
+    setElapsedMs(0);
+    setEstimatedRemainingMs(undefined);
     setError(null);
 
     try {
-      setProcessingStage('uploading');
-      setProcessingProgress(15);
-
-      await new Promise((r) => setTimeout(r, 300));
-
-      setProcessingStage('parsing');
-      setProcessingProgress(25);
-
-      const batchSize = 50;
+      const batchSize = DEFAULT_BATCH_SIZE;
       const totalBatches = parsedData
         ? Math.ceil(parsedData.totalRows / batchSize)
         : 1;
       setBatchInfo({ current: 0, total: totalBatches });
 
-      setProcessingStage('processing');
-      setProcessingProgress(35);
-
       const formData = new FormData();
       formData.append('file', selectedFile);
       formData.append('batchSize', String(batchSize));
 
-      const response = await fetch('/api/upload', {
+      const uploadResponse = await fetch('/api/upload', {
         method: 'POST',
         body: formData,
       });
 
-      const data: ImportResponse = await response.json();
+      const uploadData: ImportJobResponse = await uploadResponse.json();
 
-      if (!response.ok || !data.success) {
-        throw new Error(data.error || 'Processing failed. Please try again.');
+      if (!uploadResponse.ok || !uploadData.success || !uploadData.jobId) {
+        throw new Error(uploadData.error || 'Failed to start import job.');
       }
 
-      setProcessingProgress(90);
-      setProcessingStage('finalizing');
+      setProcessingStage('parsing');
+      setProcessingMessage(uploadData.message || 'Parsing CSV...');
 
-      await new Promise((r) => setTimeout(r, 400));
+      const jobId = uploadData.jobId;
+      let completed = false;
 
-      setProcessingProgress(100);
-      setProcessingStage('done');
+      while (!completed) {
+        await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));
 
-      await new Promise((r) => setTimeout(r, 500));
+        const statusResponse = await fetch(`/api/import/${jobId}`);
+        const statusData: ImportJobStatusResponse = await statusResponse.json();
 
-      setImportResult(data);
-      setAppState('results');
+        if (!statusResponse.ok) {
+          throw new Error(statusData.error || 'Failed to fetch import status.');
+        }
+
+        const { progress } = statusData;
+        setProcessingProgress(progress.percent);
+        setProcessingMessage(progress.message);
+        setElapsedMs(progress.elapsedMs);
+        setEstimatedRemainingMs(progress.estimatedRemainingMs);
+        setProcessingStage(mapJobStageToUiStage(progress.stage));
+
+        if (progress.totalBatches > 0) {
+          setBatchInfo({
+            current: progress.currentBatch,
+            total: progress.totalBatches,
+          });
+        }
+
+        if (statusData.status === 'completed' && statusData.result) {
+          setProcessingProgress(100);
+          setProcessingStage('done');
+          setProcessingMessage('Import completed');
+          setImportResult(statusData.result);
+          setAppState('results');
+          completed = true;
+        } else if (statusData.status === 'failed') {
+          throw new Error(statusData.error || 'Import failed.');
+        }
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'An unexpected error occurred.');
       setAppState('error');
     } finally {
+      setIsImporting(false);
       setBatchInfo(undefined);
     }
-  }, [selectedFile, parsedData]);
+  }, [selectedFile, parsedData, isImporting]);
 
   const handleReset = useCallback(() => {
     setSelectedFile(null);
@@ -132,6 +180,7 @@ export default function Home() {
     setError(null);
     setProcessingProgress(0);
     setProcessingStage('uploading');
+    setIsImporting(false);
     setAppState('idle');
   }, []);
 
@@ -165,6 +214,7 @@ export default function Home() {
             fileName={selectedFile?.name || ''}
             onConfirm={handleConfirmImport}
             onReset={handleReset}
+            isImporting={isImporting}
           />
         )}
 
@@ -173,7 +223,10 @@ export default function Home() {
             <ProcessingLoader
               stage={processingStage}
               progress={processingProgress}
+              message={processingMessage}
               batchInfo={batchInfo}
+              elapsedMs={elapsedMs}
+              estimatedRemainingMs={estimatedRemainingMs}
             />
           </div>
         )}
@@ -208,35 +261,46 @@ function IdleView({
   onFileRemoved: () => void;
 }) {
   return (
-    <div className="space-y-12">
-      <section className="mx-auto max-w-3xl text-center animate-fade-in">
-        <Badge variant="secondary" className="mb-4 gap-1.5">
-          <Sparkles className="h-3 w-3" />
-          AI-Powered CRM Import
-        </Badge>
-        <h1 className="text-4xl font-bold tracking-tight sm:text-5xl">
-          Import any CSV into your{' '}
-          <span className="bg-gradient-to-r from-primary to-primary/60 bg-clip-text text-transparent">
-            CRM format
-          </span>
-        </h1>
-        <p className="mx-auto mt-4 max-w-2xl text-lg text-muted-foreground">
-          Upload CSV files from any CRM, marketing platform, or spreadsheet.
-          Our AI engine intelligently maps, cleans, and normalizes your data into
-          a standardized CRM schema — no matter the column names or layout.
-        </p>
+    <div className="space-y-16">
+      <section className="mx-auto max-w-4xl text-center">
+        <motion.div
+          initial={{ opacity: 0, y: 20 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ duration: 0.6 }}
+        >
+          <Badge variant="secondary" className="mb-6 gap-1.5 px-4 py-2 text-sm">
+            <Sparkles className="h-3.5 w-3.5" />
+            AI-Powered CRM Import
+          </Badge>
+          <h1 className="text-5xl font-bold tracking-tight sm:text-6xl lg:text-7xl">
+            Import any CSV into your{' '}
+            <span className="gradient-text">
+              CRM format
+            </span>
+          </h1>
+          <p className="mx-auto mt-6 max-w-2xl text-xl text-muted-foreground leading-relaxed">
+            Upload CSV files from any CRM, marketing platform, or spreadsheet.
+            Our AI engine intelligently maps, cleans, and normalizes your data into
+            a standardized CRM schema — no matter the column names or layout.
+          </p>
+        </motion.div>
       </section>
 
-      <section className="mx-auto max-w-3xl animate-slide-up">
-        <Card className="border-2 border-border/60 shadow-lg">
-          <CardContent className="p-6 sm:p-8">
-            <div className="mb-6 flex items-center gap-3">
-              <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-primary/10">
-                <FileSpreadsheet className="h-5 w-5 text-primary" />
+      <motion.section
+        initial={{ opacity: 0, y: 20 }}
+        animate={{ opacity: 1, y: 0 }}
+        transition={{ duration: 0.6, delay: 0.2 }}
+        className="mx-auto max-w-3xl"
+      >
+        <Card className="border-2 border-primary/20 shadow-2xl shadow-primary/10 card-hover">
+          <CardContent className="p-8 sm:p-10">
+            <div className="mb-8 flex items-center gap-4">
+              <div className="flex h-14 w-14 items-center justify-center rounded-xl bg-gradient-to-br from-primary to-primary/70 shadow-lg shadow-primary/30">
+                <FileSpreadsheet className="h-7 w-7 text-white" />
               </div>
               <div>
-                <h2 className="text-lg font-semibold">Upload your CSV file</h2>
-                <p className="text-sm text-muted-foreground">
+                <h2 className="text-2xl font-bold">Upload your CSV file</h2>
+                <p className="text-muted-foreground">
                   Drag and drop or browse to select a CSV file
                 </p>
               </div>
@@ -251,10 +315,15 @@ function IdleView({
             />
           </CardContent>
         </Card>
-      </section>
+      </motion.section>
 
-      <section className="mx-auto max-w-5xl animate-slide-up">
-        <div className="grid gap-4 sm:grid-cols-3">
+      <motion.section
+        initial={{ opacity: 0, y: 20 }}
+        animate={{ opacity: 1, y: 0 }}
+        transition={{ duration: 0.6, delay: 0.4 }}
+        className="mx-auto max-w-6xl"
+      >
+        <div className="grid gap-6 sm:grid-cols-3">
           {[
             {
               icon: Brain,
@@ -274,33 +343,45 @@ function IdleView({
               description:
                 'Handles 5000+ rows efficiently with configurable batch sizes (20-100).',
             },
-          ].map((feature) => {
+          ].map((feature, index) => {
             const Icon = feature.icon;
             return (
-              <Card key={feature.title} className="border-border/60">
-                <CardContent className="p-5">
-                  <div className="mb-3 flex h-10 w-10 items-center justify-center rounded-lg bg-primary/10">
-                    <Icon className="h-5 w-5 text-primary" />
-                  </div>
-                  <h3 className="mb-1 font-semibold">{feature.title}</h3>
-                  <p className="text-sm text-muted-foreground">
-                    {feature.description}
-                  </p>
-                </CardContent>
-              </Card>
+              <motion.div
+                key={feature.title}
+                initial={{ opacity: 0, y: 20 }}
+                animate={{ opacity: 1, y: 0 }}
+                transition={{ duration: 0.5, delay: 0.6 + index * 0.1 }}
+              >
+                <Card className="h-full border-border/60 card-hover">
+                  <CardContent className="p-6">
+                    <div className="mb-4 flex h-12 w-12 items-center justify-center rounded-xl bg-gradient-to-br from-primary/10 to-primary/5">
+                      <Icon className="h-6 w-6 text-primary" />
+                    </div>
+                    <h3 className="mb-2 text-lg font-semibold">{feature.title}</h3>
+                    <p className="text-sm text-muted-foreground leading-relaxed">
+                      {feature.description}
+                    </p>
+                  </CardContent>
+                </Card>
+              </motion.div>
             );
           })}
         </div>
-      </section>
+      </motion.section>
 
-      <section className="mx-auto max-w-5xl">
-        <div className="mb-6 text-center">
-          <h2 className="text-xl font-semibold">Supported CSV Sources</h2>
-          <p className="text-sm text-muted-foreground">
+      <motion.section
+        initial={{ opacity: 0, y: 20 }}
+        animate={{ opacity: 1, y: 0 }}
+        transition={{ duration: 0.6, delay: 0.8 }}
+        className="mx-auto max-w-6xl"
+      >
+        <div className="mb-8 text-center">
+          <h2 className="text-2xl font-bold">Supported CSV Sources</h2>
+          <p className="mt-2 text-muted-foreground">
             Works with exports from any platform — no fixed column names required
           </p>
         </div>
-        <div className="flex flex-wrap items-center justify-center gap-2">
+        <div className="flex flex-wrap items-center justify-center gap-3">
           {[
             'Facebook Leads',
             'Google Ads',
@@ -317,14 +398,14 @@ function IdleView({
             <Badge
               key={source}
               variant="outline"
-              className="gap-1.5 py-1.5 text-sm"
+              className="gap-2 px-4 py-2 text-sm border-border/60"
             >
-              <Globe className="h-3 w-3 text-muted-foreground" />
+              <Globe className="h-3.5 w-3.5 text-muted-foreground" />
               {source}
             </Badge>
           ))}
         </div>
-      </section>
+      </motion.section>
     </div>
   );
 }
@@ -334,57 +415,107 @@ function PreviewView({
   fileName,
   onConfirm,
   onReset,
+  isImporting,
 }: {
   parsedData: ParsedCSV;
   fileName: string;
   onConfirm: () => void;
   onReset: () => void;
+  isImporting: boolean;
 }) {
   return (
-    <div className="space-y-6">
-      <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+    <motion.div
+      initial={{ opacity: 0, y: 20 }}
+      animate={{ opacity: 1, y: 0 }}
+      transition={{ duration: 0.5 }}
+      className="space-y-8"
+    >
+      <div className="flex flex-col gap-6 sm:flex-row sm:items-center sm:justify-between">
         <div>
-          <div className="flex items-center gap-2 text-sm text-muted-foreground">
+          <motion.div
+            initial={{ opacity: 0, x: -20 }}
+            animate={{ opacity: 1, x: 0 }}
+            transition={{ duration: 0.4, delay: 0.1 }}
+            className="flex items-center gap-2 text-sm text-muted-foreground"
+          >
             <CheckCircle2 className="h-4 w-4 text-success" />
-            <span>CSV parsed successfully</span>
-          </div>
-          <h2 className="mt-1 text-2xl font-bold tracking-tight">
+            <span className="font-medium">CSV parsed successfully</span>
+          </motion.div>
+          <motion.h2
+            initial={{ opacity: 0, y: 10 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ duration: 0.4, delay: 0.2 }}
+            className="mt-2 text-3xl font-bold tracking-tight"
+          >
             Preview your data
-          </h2>
-          <p className="text-sm text-muted-foreground">
+          </motion.h2>
+          <motion.p
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            transition={{ duration: 0.4, delay: 0.3 }}
+            className="text-muted-foreground"
+          >
             Review the detected columns and data before confirming the import.
-          </p>
+          </motion.p>
         </div>
-        <div className="flex items-center gap-3">
-          <Button variant="ghost" onClick={onReset}>
+        <motion.div
+          initial={{ opacity: 0, x: 20 }}
+          animate={{ opacity: 1, x: 0 }}
+          transition={{ duration: 0.4, delay: 0.3 }}
+          className="flex items-center gap-3"
+        >
+          <Button 
+            variant="ghost" 
+            onClick={onReset} 
+            disabled={isImporting}
+            className="rounded-xl"
+          >
             Cancel
           </Button>
-          <Button onClick={onConfirm} size="lg" className="gap-2">
+          <Button 
+            onClick={onConfirm} 
+            size="lg" 
+            className="gap-2 rounded-xl shadow-lg shadow-primary/25 btn-hover" 
+            disabled={isImporting}
+          >
             <Sparkles className="h-4 w-4" />
-            Confirm Import
+            {isImporting ? 'Importing...' : 'Confirm Import'}
             <ArrowRight className="h-4 w-4" />
           </Button>
-        </div>
+        </motion.div>
       </div>
 
-      <Card className="border-border/60">
-        <CardContent className="p-6">
-          <div className="mb-4 flex items-center gap-2 text-sm">
-            <FileSpreadsheet className="h-4 w-4 text-muted-foreground" />
-            <span className="font-medium">{fileName}</span>
-          </div>
-          <PreviewTable data={parsedData} />
-        </CardContent>
-      </Card>
+      <motion.div
+        initial={{ opacity: 0, y: 20 }}
+        animate={{ opacity: 1, y: 0 }}
+        transition={{ duration: 0.5, delay: 0.2 }}
+      >
+        <Card className="border-border/60 shadow-xl">
+          <CardContent className="p-6">
+            <div className="mb-6 flex items-center gap-3 text-sm">
+              <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-primary/10">
+                <FileSpreadsheet className="h-5 w-5 text-primary" />
+              </div>
+              <span className="font-semibold">{fileName}</span>
+            </div>
+            <PreviewTable data={parsedData} />
+          </CardContent>
+        </Card>
+      </motion.div>
 
-      <div className="flex items-center justify-center gap-2 rounded-lg bg-accent/50 px-4 py-3 text-sm text-accent-foreground">
-        <Brain className="h-4 w-4 text-primary" />
-        <span>
+      <motion.div
+        initial={{ opacity: 0, y: 20 }}
+        animate={{ opacity: 1, y: 0 }}
+        transition={{ duration: 0.5, delay: 0.3 }}
+        className="flex items-center justify-center gap-3 rounded-2xl bg-gradient-to-r from-primary/5 to-primary/10 border border-primary/20 px-6 py-4 text-sm"
+      >
+        <Brain className="h-5 w-5 text-primary" />
+        <span className="text-foreground">
           Clicking <strong>Confirm Import</strong> will send your data to the AI
           engine for intelligent mapping to the CRM schema.
         </span>
-      </div>
-    </div>
+      </motion.div>
+    </motion.div>
   );
 }
 
@@ -398,58 +529,113 @@ function ResultsView({
   onReset: () => void;
 }) {
   return (
-    <div className="space-y-6">
-      <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+    <motion.div
+      initial={{ opacity: 0, y: 20 }}
+      animate={{ opacity: 1, y: 0 }}
+      transition={{ duration: 0.5 }}
+      className="space-y-8"
+    >
+      <div className="flex flex-col gap-6 sm:flex-row sm:items-center sm:justify-between">
         <div>
-          <div className="flex items-center gap-2 text-sm text-muted-foreground">
+          <motion.div
+            initial={{ opacity: 0, x: -20 }}
+            animate={{ opacity: 1, x: 0 }}
+            transition={{ duration: 0.4, delay: 0.1 }}
+            className="flex items-center gap-2 text-sm text-muted-foreground"
+          >
             <CheckCircle2 className="h-4 w-4 text-success" />
-            <span>Import complete</span>
-          </div>
-          <h2 className="mt-1 text-2xl font-bold tracking-tight">
+            <span className="font-medium">Import complete</span>
+          </motion.div>
+          <motion.h2
+            initial={{ opacity: 0, y: 10 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ duration: 0.4, delay: 0.2 }}
+            className="mt-2 text-3xl font-bold tracking-tight"
+          >
             Import Results
-          </h2>
-          <p className="text-sm text-muted-foreground">
+          </motion.h2>
+          <motion.p
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            transition={{ duration: 0.4, delay: 0.3 }}
+            className="text-muted-foreground"
+          >
             Your data has been processed and mapped to the CRM schema.
-          </p>
+          </motion.p>
         </div>
       </div>
 
-      <ImportSummary
-        summary={summary}
-        records={records}
-        onReset={onReset}
-      />
+      <motion.div
+        initial={{ opacity: 0, y: 20 }}
+        animate={{ opacity: 1, y: 0 }}
+        transition={{ duration: 0.5, delay: 0.2 }}
+      >
+        <ImportSummary
+          summary={summary}
+          records={records}
+          onReset={onReset}
+        />
+      </motion.div>
 
-      <Card className="border-border/60">
-        <CardContent className="p-6">
-          <ParsedTable records={records} />
-        </CardContent>
-      </Card>
-    </div>
+      <motion.div
+        initial={{ opacity: 0, y: 20 }}
+        animate={{ opacity: 1, y: 0 }}
+        transition={{ duration: 0.5, delay: 0.3 }}
+      >
+        <Card className="border-border/60 shadow-xl">
+          <CardContent className="p-6">
+            <ParsedTable records={records} />
+          </CardContent>
+        </Card>
+      </motion.div>
+    </motion.div>
   );
 }
 
 function ErrorView({ error, onReset }: { error: string | null; onReset: () => void }) {
   return (
-    <div className="mx-auto max-w-lg animate-scale-in">
-      <Card className="border-destructive/30">
-        <CardContent className="flex flex-col items-center gap-6 p-8 text-center">
-          <div className="flex h-16 w-16 items-center justify-center rounded-2xl bg-destructive/10">
-            <AlertCircle className="h-8 w-8 text-destructive" />
-          </div>
-          <div>
-            <h2 className="text-xl font-semibold">Import failed</h2>
-            <p className="mt-2 text-sm text-muted-foreground">
+    <motion.div
+      initial={{ opacity: 0, scale: 0.95 }}
+      animate={{ opacity: 1, scale: 1 }}
+      transition={{ duration: 0.4 }}
+      className="mx-auto max-w-lg"
+    >
+      <Card className="border-destructive/30 shadow-xl shadow-destructive/10">
+        <CardContent className="flex flex-col items-center gap-8 p-10 text-center">
+          <motion.div
+            initial={{ scale: 0.8, opacity: 0 }}
+            animate={{ scale: 1, opacity: 1 }}
+            transition={{ duration: 0.4, delay: 0.1 }}
+            className="flex h-20 w-20 items-center justify-center rounded-2xl bg-destructive/10"
+          >
+            <AlertCircle className="h-10 w-10 text-destructive" />
+          </motion.div>
+          <motion.div
+            initial={{ opacity: 0, y: 10 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ duration: 0.4, delay: 0.2 }}
+            className="space-y-2"
+          >
+            <h2 className="text-2xl font-bold">Import failed</h2>
+            <p className="text-muted-foreground">
               {error || 'An unexpected error occurred during processing.'}
             </p>
-          </div>
-          <div className="flex gap-3">
-            <Button variant="outline" onClick={onReset}>
+          </motion.div>
+          <motion.div
+            initial={{ opacity: 0, y: 10 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ duration: 0.4, delay: 0.3 }}
+          >
+            <Button 
+              variant="outline" 
+              onClick={onReset}
+              className="rounded-xl"
+            >
               Try Again
             </Button>
-          </div>
+          </motion.div>
         </CardContent>
       </Card>
-    </div>
+    </motion.div>
   );
 }

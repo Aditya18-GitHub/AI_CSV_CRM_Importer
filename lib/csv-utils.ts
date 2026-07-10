@@ -1,4 +1,5 @@
 import type { ParsedCSV } from '@/types/crm';
+import { normalizeCellValue } from '@/lib/record-utils';
 
 export async function parseCSV(
   file: File,
@@ -28,13 +29,20 @@ export async function parseCSV(
           return;
         }
 
-        const rows = results.data.filter(
-          (row) =>
-            row &&
-            Object.values(row).some(
-              (v) => v !== null && v !== undefined && String(v).trim() !== ''
-            )
-        );
+        const rows = results.data
+          .map((row) => {
+            if (!row) return null;
+            const normalized: Record<string, string> = {};
+            for (const [key, value] of Object.entries(row)) {
+              normalized[key] = normalizeCellValue(value);
+            }
+            return normalized;
+          })
+          .filter(
+            (row): row is Record<string, string> =>
+              !!row &&
+              Object.values(row).some((v) => v !== '')
+          );
 
         if (rows.length === 0) {
           reject(new Error('CSV file contains no data rows.'));
@@ -78,13 +86,19 @@ export async function parseCSVText(text: string): Promise<ParsedCSV> {
     throw new Error('No columns detected in CSV file.');
   }
 
-  const rows = (results.data || []).filter(
-    (row) =>
-      row &&
-      Object.values(row).some(
-        (v) => v !== null && v !== undefined && String(v).trim() !== ''
-      )
-  );
+  const rows = (results.data || [])
+    .map((row) => {
+      if (!row) return null;
+      const normalized: Record<string, string> = {};
+      for (const [key, value] of Object.entries(row)) {
+        normalized[key] = normalizeCellValue(value);
+      }
+      return normalized;
+    })
+    .filter(
+      (row): row is Record<string, string> =>
+        !!row && Object.values(row).some((v) => v !== '')
+    );
 
   if (rows.length === 0) {
     throw new Error('CSV file contains no data rows.');

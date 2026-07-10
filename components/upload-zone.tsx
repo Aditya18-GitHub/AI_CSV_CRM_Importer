@@ -1,6 +1,7 @@
 'use client';
 
 import { useCallback, useState } from 'react';
+import { motion } from 'framer-motion';
 import { useDropzone, type FileRejection } from 'react-dropzone';
 import {
   UploadCloud,
@@ -71,36 +72,43 @@ export function UploadZone({
 
   if (selectedFile) {
     return (
-      <div className="animate-scale-in">
+      <motion.div
+        initial={{ opacity: 0, scale: 0.95 }}
+        animate={{ opacity: 1, scale: 1 }}
+        transition={{ duration: 0.3 }}
+      >
         <div
           className={cn(
-            'relative flex items-center gap-4 rounded-xl border-2 border-solid p-5 transition-colors',
+            'relative flex items-center gap-4 rounded-2xl border-2 border-solid p-6 transition-all duration-300',
             parseError
-              ? 'border-destructive/50 bg-destructive/5'
-              : 'border-primary/30 bg-primary/5'
+              ? 'border-destructive/50 bg-destructive/5 shadow-lg shadow-destructive/10'
+              : 'border-primary/30 bg-primary/5 shadow-lg shadow-primary/10'
           )}
         >
-          <div
+          <motion.div
+            initial={{ scale: 0.8, opacity: 0 }}
+            animate={{ scale: 1, opacity: 1 }}
+            transition={{ duration: 0.3, delay: 0.1 }}
             className={cn(
-              'flex h-12 w-12 shrink-0 items-center justify-center rounded-lg',
+              'flex h-14 w-14 shrink-0 items-center justify-center rounded-xl',
               parseError
                 ? 'bg-destructive/10 text-destructive'
-                : 'bg-primary/10 text-primary'
+                : 'bg-gradient-to-br from-primary to-primary/70 text-white shadow-lg'
             )}
           >
             {isParsing ? (
-              <Loader2 className="h-6 w-6 animate-spin" />
+              <Loader2 className="h-7 w-7 animate-spin" />
             ) : parseError ? (
-              <AlertCircle className="h-6 w-6" />
+              <AlertCircle className="h-7 w-7" />
             ) : (
-              <CheckCircle2 className="h-6 w-6" />
+              <CheckCircle2 className="h-7 w-7" />
             )}
-          </div>
+          </motion.div>
 
-          <div className="flex min-w-0 flex-1 flex-col gap-0.5">
+          <div className="flex min-w-0 flex-1 flex-col gap-1">
             <div className="flex items-center gap-2">
-              <FileText className="h-4 w-4 shrink-0 text-muted-foreground" />
-              <span className="truncate text-sm font-medium">{selectedFile.name}</span>
+              <FileText className="h-4.5 w-4.5 shrink-0 text-muted-foreground" />
+              <span className="truncate text-sm font-semibold">{selectedFile.name}</span>
             </div>
             <span className="text-xs text-muted-foreground">
               {formatFileSize(selectedFile.size)}
@@ -110,78 +118,100 @@ export function UploadZone({
           </div>
 
           {!isParsing && (
-            <Button
-              variant="ghost"
-              size="icon"
-              onClick={onFileRemoved}
-              className="shrink-0"
-              aria-label="Remove file"
+            <motion.div
+              initial={{ opacity: 0, scale: 0.8 }}
+              animate={{ opacity: 1, scale: 1 }}
+              transition={{ duration: 0.2, delay: 0.2 }}
             >
-              <X className="h-4 w-4" />
-            </Button>
+              <Button
+                variant="ghost"
+                size="icon"
+                onClick={onFileRemoved}
+                className="shrink-0 rounded-xl hover:bg-destructive/10 hover:text-destructive"
+                aria-label="Remove file"
+              >
+                <X className="h-4 w-4" />
+              </Button>
+            </motion.div>
           )}
         </div>
-      </div>
+      </motion.div>
     );
   }
 
   return (
-    <div className="animate-fade-in">
+    <motion.div
+      initial={{ opacity: 0, y: 10 }}
+      animate={{ opacity: 1, y: 0 }}
+      transition={{ duration: 0.4 }}
+    >
       <div
         {...getRootProps()}
         className={cn(
-          'group relative flex cursor-pointer flex-col items-center justify-center gap-4 rounded-xl border-2 border-dashed p-12 text-center transition-all duration-300',
+          'group relative flex cursor-pointer flex-col items-center justify-center gap-6 rounded-2xl border-2 border-dashed p-12 text-center transition-all duration-300',
           isDragActive && !isDragReject
-            ? 'border-primary bg-primary/5 scale-[1.01]'
-            : 'border-border hover:border-primary/50 hover:bg-accent/50',
-          isDragReject && 'border-destructive bg-destructive/5',
+            ? 'border-primary bg-primary/5 scale-[1.02] shadow-xl shadow-primary/20'
+            : 'border-border/60 hover:border-primary/40 hover:bg-accent/30',
+          isDragReject && 'border-destructive bg-destructive/5 shadow-lg shadow-destructive/10',
           dragError && 'border-destructive'
         )}
       >
         <input {...getInputProps()} />
 
-        <div
+        <motion.div
+          animate={{
+            scale: isDragActive ? 1.1 : 1,
+            rotate: isDragActive ? 5 : 0,
+          }}
+          transition={{ duration: 0.3 }}
           className={cn(
-            'flex h-16 w-16 items-center justify-center rounded-2xl transition-all duration-300',
+            'flex h-20 w-20 items-center justify-center rounded-2xl transition-all duration-300',
             isDragActive
-              ? 'bg-primary text-primary-foreground scale-110 shadow-lg shadow-primary/30'
-              : 'bg-muted text-muted-foreground group-hover:bg-primary/10 group-hover:text-primary'
+              ? 'bg-gradient-to-br from-primary to-primary/70 text-white shadow-2xl shadow-primary/40'
+              : 'bg-muted/50 text-muted-foreground group-hover:bg-primary/10 group-hover:text-primary'
           )}
         >
           <UploadCloud
             className={cn(
-              'h-8 w-8 transition-transform',
+              'h-10 w-10 transition-transform',
               isDragActive && 'scale-110'
             )}
           />
-        </div>
+        </motion.div>
 
-        <div className="space-y-1.5">
-          <p className="text-base font-semibold">
+        <div className="space-y-2">
+          <motion.p
+            animate={{ scale: isDragActive ? 1.05 : 1 }}
+            className="text-lg font-semibold"
+          >
             {isDragActive
               ? 'Drop your CSV file here'
               : 'Drag & drop your CSV file here'}
-          </p>
+          </motion.p>
           <p className="text-sm text-muted-foreground">
             or{' '}
-            <span className="font-medium text-primary underline-offset-4 group-hover:underline">
+            <span className="font-medium text-primary underline-offset-4 group-hover:underline transition-all">
               browse files
             </span>
           </p>
         </div>
 
-        <div className="flex items-center gap-2 text-xs text-muted-foreground">
-          <span className="rounded-md bg-muted px-2 py-1 font-medium">CSV only</span>
-          <span className="rounded-md bg-muted px-2 py-1 font-medium">Max 10 MB</span>
+        <div className="flex items-center gap-3 text-xs text-muted-foreground">
+          <span className="rounded-full bg-muted/80 px-3 py-1.5 font-medium border border-border/50">CSV only</span>
+          <span className="rounded-full bg-muted/80 px-3 py-1.5 font-medium border border-border/50">Max 10 MB</span>
         </div>
 
         {(dragError || parseError) && (
-          <div className="mt-2 flex items-center gap-2 rounded-lg bg-destructive/10 px-4 py-2 text-sm text-destructive">
+          <motion.div
+            initial={{ opacity: 0, y: 10 }}
+            animate={{ opacity: 1, y: 0 }}
+            className="mt-3 flex items-center gap-2 rounded-xl bg-destructive/10 px-4 py-3 text-sm text-destructive border border-destructive/20"
+          >
             <AlertCircle className="h-4 w-4 shrink-0" />
             <span>{dragError || parseError}</span>
-          </div>
+          </motion.div>
         )}
       </div>
-    </div>
+    </motion.div>
   );
 }
